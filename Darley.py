@@ -12,75 +12,44 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# =========================
-# ESTILO
-# =========================
 st.markdown(
     """
     <style>
-    .main {
-        background: linear-gradient(180deg, #0b1220 0%, #111827 100%);
-    }
-    .block-container {
-        padding-top: 1.2rem;
-        padding-bottom: 2rem;
-    }
+    .main { background: linear-gradient(180deg, #0b1220 0%, #111827 100%); }
+    .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
     .hero {
-        padding: 1.2rem 1.4rem;
-        border-radius: 18px;
+        padding: 1.2rem 1.4rem; border-radius: 18px;
         background: linear-gradient(135deg, rgba(249,115,22,0.18), rgba(14,165,233,0.12));
-        border: 1px solid rgba(255,255,255,0.08);
-        margin-bottom: 1rem;
+        border: 1px solid rgba(255,255,255,0.08); margin-bottom: 1rem;
         box-shadow: 0 8px 24px rgba(0,0,0,0.18);
     }
-    .hero h1 {
-        font-size: 2rem;
-        margin: 0;
-        color: #f8fafc;
-    }
-    .hero p {
-        font-size: 0.95rem;
-        color: #cbd5e1;
-        margin-top: 0.35rem;
-        margin-bottom: 0;
-    }
+    .hero h1 { font-size: 2rem; margin: 0; color: #f8fafc; }
+    .hero p { font-size: 0.95rem; color: #cbd5e1; margin-top: 0.35rem; margin-bottom: 0; }
     .kpi-card {
-        background: rgba(17,24,39,0.78);
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 18px;
-        padding: 1rem 1rem 0.8rem 1rem;
+        background: rgba(17,24,39,0.78); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 18px; padding: 1rem 1rem 0.8rem 1rem;
         box-shadow: 0 8px 24px rgba(0,0,0,0.15);
     }
-    .kpi-title {
-        color: #94a3b8;
-        font-size: 0.88rem;
-        margin-bottom: 0.2rem;
-    }
-    .kpi-value {
-        color: #f8fafc;
-        font-size: 1.7rem;
-        font-weight: 700;
-        line-height: 1.1;
-    }
-    .kpi-sub {
-        color: #cbd5e1;
-        font-size: 0.82rem;
-        margin-top: 0.35rem;
-    }
+    .kpi-title { color: #94a3b8; font-size: 0.88rem; margin-bottom: 0.2rem; }
+    .kpi-value { color: #f8fafc; font-size: 1.7rem; font-weight: 700; line-height: 1.1; }
+    .kpi-sub { color: #cbd5e1; font-size: 0.82rem; margin-top: 0.35rem; }
     div[data-testid="stMetric"] {
-        background: rgba(17,24,39,0.78);
-        border: 1px solid rgba(255,255,255,0.08);
-        padding: 14px;
-        border-radius: 16px;
+        background: rgba(17,24,39,0.78); border: 1px solid rgba(255,255,255,0.08);
+        padding: 14px; border-radius: 16px;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# =========================
-# FUNÇÕES
-# =========================
+COLS_TEXTO = [
+    "Digitalizador", "Base de escaneamento", "Base Destino", "Município de Destino",
+    "Estado da cidade de destino", "Nome da linha", "Tipo problemático",
+    "Descrição de Pacote Problemático", "Número do lote", "Número de pedido JMS",
+    "Tipo de bipagem",
+]
+COLS_DATA = ["Tempo de digitalização", "Tempo de upload", "Saída do dia"]
+
 
 def padronizar_texto(s):
     if pd.isna(s):
@@ -88,11 +57,63 @@ def padronizar_texto(s):
     s = str(s).strip()
     return s if s else np.nan
 
+
+def padronizar_dataframe(df, nome_fonte, idx, aba):
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.dropna(axis=1, how="all")
+    df["Arquivo origem"] = nome_fonte
+    df["Base arquivo"] = f"Base {idx}"
+    df["Aba origem"] = aba
+
+    for col in COLS_DATA:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    for col in COLS_TEXTO:
+        if col in df.columns:
+            df[col] = df[col].apply(padronizar_texto)
+
+    if "Tempo de digitalização" in df.columns:
+        df["Data"] = df["Tempo de digitalização"].dt.date
+        df["Hora"] = df["Tempo de digitalização"].dt.hour
+        df["DiaHora"] = df["Tempo de digitalização"].dt.floor("h")
+    else:
+        df["Data"] = pd.NaT
+        df["Hora"] = np.nan
+        df["DiaHora"] = pd.NaT
+
+    return df
+
+
+def detectar_problematicos(df):
+    if df.empty:
+        return pd.DataFrame()
+
+    mask = pd.Series(False, index=df.index)
+
+    if "Tipo problemático" in df.columns:
+        mask = mask | df["Tipo problemático"].notna()
+
+    if "Descrição de Pacote Problemático" in df.columns:
+        mask = mask | df["Descrição de Pacote Problemático"].notna()
+
+    if "Tipo de bipagem" in df.columns:
+        bip = df["Tipo de bipagem"].astype(str).str.lower()
+        mask = mask | bip.str.contains("problem", na=False) | bip.str.contains("problemático", na=False)
+
+    return df.loc[mask].copy()
+
+
 @st.cache_data(show_spinner=False)
 def carregar_dados_multiplos(arquivos):
-    bases_car, bases_prob, bases_bi, bases_dina = [], [], [], []
+    bases_car, bases_prob = [], []
     abas_identificadas = set()
     fontes = []
+    modo_detectado = []
 
     for idx, arquivo in enumerate(arquivos, start=1):
         if arquivo is None:
@@ -102,82 +123,39 @@ def carregar_dados_multiplos(arquivos):
         xls = pd.ExcelFile(arquivo)
         abas = xls.sheet_names
         abas_identificadas.update(abas)
-
-        df_car = pd.read_excel(arquivo, sheet_name="CARREGAMENTO") if "CARREGAMENTO" in abas else pd.DataFrame()
-        df_prob = pd.read_excel(arquivo, sheet_name="PROBLEMATICOS") if "PROBLEMATICOS" in abas else pd.DataFrame()
-        df_bi = pd.read_excel(arquivo, sheet_name="BI") if "BI" in abas else pd.DataFrame()
-        df_dina = pd.read_excel(arquivo, sheet_name="DINA") if "DINA" in abas else pd.DataFrame()
-
-        for nome_df, df in {
-            "CARREGAMENTO": df_car,
-            "PROBLEMATICOS": df_prob,
-            "BI": df_bi,
-            "DINA": df_dina,
-        }.items():
-            if not df.empty:
-                df["Arquivo origem"] = nome_fonte
-                df["Base arquivo"] = f"Base {idx}"
-                df["Aba origem"] = nome_df
-
-        for df in [df_car, df_prob]:
-            if not df.empty:
-                for col in [
-                    "Tempo de digitalização",
-                    "Tempo de upload",
-                    "Saída do dia",
-                ]:
-                    if col in df.columns:
-                        df[col] = pd.to_datetime(df[col], errors="coerce")
-
-                for col in [
-                    "Digitalizador",
-                    "Base de escaneamento",
-                    "Base Destino",
-                    "Município de Destino",
-                    "Estado da cidade de destino",
-                    "Nome da linha",
-                    "Tipo problemático",
-                    "Descrição de Pacote Problemático",
-                    "Número do lote",
-                    "Número de pedido JMS",
-                ]:
-                    if col in df.columns:
-                        df[col] = df[col].apply(padronizar_texto)
-
-        bases_car.append(df_car)
-        bases_prob.append(df_prob)
-        bases_bi.append(df_bi)
-        bases_dina.append(df_dina)
         fontes.append(nome_fonte)
+
+        abas_upper = {a.upper(): a for a in abas}
+        tem_modelo_completo = any(a in abas_upper for a in ["CARREGAMENTO", "PROBLEMATICOS"])
+
+        if tem_modelo_completo:
+            modo_detectado.append(f"Base {idx}: modo multiaba")
+            if "CARREGAMENTO" in abas_upper:
+                df_car = pd.read_excel(xls, sheet_name=abas_upper["CARREGAMENTO"])
+                df_car = padronizar_dataframe(df_car, nome_fonte, idx, abas_upper["CARREGAMENTO"])
+                bases_car.append(df_car)
+            if "PROBLEMATICOS" in abas_upper:
+                df_prob = pd.read_excel(xls, sheet_name=abas_upper["PROBLEMATICOS"])
+                df_prob = padronizar_dataframe(df_prob, nome_fonte, idx, abas_upper["PROBLEMATICOS"])
+                bases_prob.append(df_prob)
+        else:
+            primeira_aba = abas[0]
+            df_base = pd.read_excel(xls, sheet_name=primeira_aba)
+            df_base = padronizar_dataframe(df_base, nome_fonte, idx, primeira_aba)
+            bases_car.append(df_base)
+            bases_prob.append(detectar_problematicos(df_base))
+            modo_detectado.append(f"Base {idx}: modo aba única ({primeira_aba})")
 
     df_car = pd.concat([df for df in bases_car if not df.empty], ignore_index=True) if any(not df.empty for df in bases_car) else pd.DataFrame()
     df_prob = pd.concat([df for df in bases_prob if not df.empty], ignore_index=True) if any(not df.empty for df in bases_prob) else pd.DataFrame()
-    df_bi = pd.concat([df for df in bases_bi if not df.empty], ignore_index=True) if any(not df.empty for df in bases_bi) else pd.DataFrame()
-    df_dina = pd.concat([df for df in bases_dina if not df.empty], ignore_index=True) if any(not df.empty for df in bases_dina) else pd.DataFrame()
 
-    if not df_car.empty and "Tempo de digitalização" in df_car.columns:
-        df_car["Data"] = df_car["Tempo de digitalização"].dt.date
-        df_car["Hora"] = df_car["Tempo de digitalização"].dt.hour
-        df_car["DiaHora"] = df_car["Tempo de digitalização"].dt.floor("H")
-    else:
-        df_car["Data"] = pd.NaT
-        df_car["Hora"] = np.nan
-        df_car["DiaHora"] = pd.NaT
-
-    if not df_prob.empty and "Tempo de digitalização" in df_prob.columns:
-        df_prob["Data"] = df_prob["Tempo de digitalização"].dt.date
-        df_prob["Hora"] = df_prob["Tempo de digitalização"].dt.hour
-    else:
-        df_prob["Data"] = pd.NaT
-        df_prob["Hora"] = np.nan
-
-    return df_car, df_prob, df_bi, df_dina, sorted(abas_identificadas), fontes
+    return df_car, df_prob, sorted(abas_identificadas), fontes, modo_detectado
 
 
 def aplicar_filtros(df_car, df_prob):
     st.sidebar.markdown("## Filtros")
 
-    datas = sorted([d for d in df_car["Data"].dropna().unique().tolist()]) if "Data" in df_car.columns else []
+    datas = sorted([d for d in df_car.get("Data", pd.Series(dtype=object)).dropna().unique().tolist()])
     base_opts = sorted(df_car.get("Base Destino", pd.Series(dtype=str)).dropna().unique().tolist())
     mun_opts = sorted(df_car.get("Município de Destino", pd.Series(dtype=str)).dropna().unique().tolist())
     dig_opts = sorted(df_car.get("Digitalizador", pd.Series(dtype=str)).dropna().unique().tolist())
@@ -195,7 +173,7 @@ def aplicar_filtros(df_car, df_prob):
         if df.empty:
             return df
         out = df.copy()
-        if data_sel:
+        if data_sel and "Data" in out.columns:
             out = out[out["Data"].isin(data_sel)]
         if arquivo_sel and "Base arquivo" in out.columns:
             out = out[out["Base arquivo"].isin(arquivo_sel)]
@@ -234,14 +212,11 @@ def grafico_vazio(texto="Sem dados para os filtros selecionados"):
     return fig
 
 
-# =========================
-# CABEÇALHO
-# =========================
 st.markdown(
     """
     <div class='hero'>
         <h1>📦 Painel Gerencial de Expedição</h1>
-        <p>Acompanhamento de volume expedido, produtividade por digitalizador, destinos, lotes e pacotes problemáticos em um layout executivo.</p>
+        <p>Acompanhamento de volume, produtividade, destinos e exceções em um layout executivo e pronto para uso diário.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -250,92 +225,66 @@ st.markdown(
 arquivo_default = Path("/mnt/data/EXPEDIÇÃO.xlsx")
 
 st.sidebar.markdown("### Bases de entrada")
-arquivo_1 = st.sidebar.file_uploader("Base 1 - planilha de inserido em lote", type=["xlsx"], key="base_1")
-arquivo_2 = st.sidebar.file_uploader("Base 2 - planilha de bipe de pacote problematico", type=["xlsx"], key="base_2")
+arquivo_1 = st.sidebar.file_uploader("Base 1 - planilha de expedição", type=["xlsx"], key="base_1")
+arquivo_2 = st.sidebar.file_uploader("Base 2 - planilha de expedição", type=["xlsx"], key="base_2")
 
 arquivos_para_carga = [arq for arq in [arquivo_1, arquivo_2] if arq is not None]
 if not arquivos_para_carga and arquivo_default.exists():
     arquivos_para_carga = [arquivo_default]
 
 if not arquivos_para_carga:
-    st.warning("Envie pelo menos uma planilha .xlsx para iniciar a análise.")
+    st.info("Envie pelo menos uma planilha para iniciar a análise.")
     st.stop()
 
-# =========================
-# CARGA
-# =========================
-df_car, df_prob, df_bi, df_dina, abas, fontes = carregar_dados_multiplos(arquivos_para_carga)
+car_df, prob_df, abas, fontes, modos = carregar_dados_multiplos(arquivos_para_carga)
+car_f, prob_f = aplicar_filtros(car_df, prob_df)
 
-if df_car.empty:
-    st.error("A aba CARREGAMENTO não foi encontrada ou está vazia.")
-    st.stop()
-
-car_f, prob_f = aplicar_filtros(df_car, df_prob)
-
-# =========================
-# KPIs
-# =========================
 vol_total = len(car_f)
-pedidos_unicos = car_f["Número de pedido JMS"].nunique() if "Número de pedido JMS" in car_f.columns else 0
-lotes = car_f["Número do lote"].nunique() if "Número do lote" in car_f.columns else 0
-digitalizadores = car_f["Digitalizador"].nunique() if "Digitalizador" in car_f.columns else 0
-bases_dest = car_f["Base Destino"].nunique() if "Base Destino" in car_f.columns else 0
 prob_total = len(prob_f)
-prob_rate = (prob_total / vol_total * 100) if vol_total else 0
-media_dig = (vol_total / digitalizadores) if digitalizadores else 0
+prob_rate = round((prob_total / vol_total) * 100, 2) if vol_total else 0
+bases_destino = car_f["Base Destino"].nunique() if "Base Destino" in car_f.columns else 0
+digitalizadores = car_f["Digitalizador"].nunique() if "Digitalizador" in car_f.columns else 0
+lotes = car_f["Número do lote"].nunique() if "Número do lote" in car_f.columns else 0
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1, c2, c3, c4, c5 = st.columns(5)
 with c1:
-    card("Volumes expedidos", f"{vol_total:,.0f}".replace(",", "."), "Registros somados das bases carregadas")
+    card("Volumes", f"{vol_total:,}".replace(",", "."), "Registros analisados")
 with c2:
-    card("Pedidos únicos", f"{pedidos_unicos:,.0f}".replace(",", "."), "Número de pedido JMS")
+    card("Problemáticos", f"{prob_total:,}".replace(",", "."), "Registros críticos detectados")
 with c3:
-    card("Lotes", f"{lotes:,.0f}".replace(",", "."), "Lotes movimentados")
+    card("Taxa crítica", f"{prob_rate}%", "Problemáticos sobre o total")
 with c4:
-    card("Digitalizadores", f"{digitalizadores:,.0f}".replace(",", "."), f"Média de {media_dig:,.0f}".replace(",", ".") + " por pessoa")
+    card("Bases destino", f"{bases_destino:,}".replace(",", "."), "Cobertura operacional")
 with c5:
-    card("Bases destino", f"{bases_dest:,.0f}".replace(",", "."), "Cobertura operacional")
-with c6:
-    card("% problemáticos", f"{prob_rate:.2f}%", f"{prob_total:,.0f}".replace(",", ".") + " ocorrências")
+    card("Digitalizadores", f"{digitalizadores:,}".replace(",", "."), f"Lotes únicos: {lotes:,}".replace(",", "."))
 
-# =========================
-# RESUMO DE CARGA
-# =========================
-if fontes:
-    resumo_fontes = " | ".join([f"{i+1}: {nome}" for i, nome in enumerate(fontes)])
-    st.caption(f"Bases carregadas: {resumo_fontes}")
-
-# =========================
-# INSIGHTS RÁPIDOS
-# =========================
 ins1, ins2, ins3 = st.columns(3)
 with ins1:
     if not car_f.empty and "Digitalizador" in car_f.columns:
         top_dig = car_f["Digitalizador"].value_counts().head(1)
-        nome = top_dig.index[0] if not top_dig.empty else "-"
-        qtd = int(top_dig.iloc[0]) if not top_dig.empty else 0
-        st.info(f"**Maior produtividade:** {nome} com **{qtd:,}** bipagens.".replace(",", "."))
+        if not top_dig.empty:
+            st.info(f"**Maior produtividade:** {top_dig.index[0]} com **{int(top_dig.iloc[0]):,}** bipagens.".replace(",", "."))
 with ins2:
     if not car_f.empty and "Base Destino" in car_f.columns:
         top_base = car_f["Base Destino"].value_counts().head(1)
-        nome = top_base.index[0] if not top_base.empty else "-"
-        qtd = int(top_base.iloc[0]) if not top_base.empty else 0
-        st.info(f"**Base com maior volume:** {nome} com **{qtd:,}** pacotes.".replace(",", "."))
+        if not top_base.empty:
+            st.info(f"**Base com maior volume:** {top_base.index[0]} com **{int(top_base.iloc[0]):,}** registros.".replace(",", "."))
 with ins3:
     if not prob_f.empty and "Tipo problemático" in prob_f.columns:
         top_prob = prob_f["Tipo problemático"].value_counts().head(1)
-        nome = top_prob.index[0] if not top_prob.empty else "-"
-        qtd = int(top_prob.iloc[0]) if not top_prob.empty else 0
-        st.info(f"**Principal causa crítica:** {nome} com **{qtd:,}** registros.".replace(",", "."))
+        if not top_prob.empty:
+            st.info(f"**Principal causa crítica:** {top_prob.index[0]} com **{int(top_prob.iloc[0]):,}** registros.".replace(",", "."))
+        else:
+            st.info("**Registros críticos detectados**, mas sem classificação de tipo problemático.")
+    elif not prob_f.empty:
+        st.info(f"**Registros críticos detectados:** {len(prob_f):,}.".replace(",", "."))
 
-# =========================
-# ABAS
-# =========================
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Visão Executiva",
     "Produtividade",
     "Destinos",
-    "Problemáticos",
+    "Exceções",
     "Detalhamento",
 ])
 
@@ -345,41 +294,33 @@ with tab1:
     with g1:
         if not car_f.empty and "DiaHora" in car_f.columns:
             vol_hora = (
-                car_f.dropna(subset=["DiaHora"])
-                .groupby("DiaHora")
-                .size()
-                .reset_index(name="Volumes")
-                .sort_values("DiaHora")
+                car_f.dropna(subset=["DiaHora"]).groupby("DiaHora").size().reset_index(name="Volumes").sort_values("DiaHora")
             )
-            fig = px.area(
-                vol_hora,
-                x="DiaHora",
-                y="Volumes",
-                title="Evolução do volume expedido ao longo do tempo",
-            )
-            fig.update_layout(height=380)
-            st.plotly_chart(fig, use_container_width=True)
+            if not vol_hora.empty:
+                fig = px.area(vol_hora, x="DiaHora", y="Volumes", title="Evolução do volume ao longo do tempo")
+                fig.update_layout(height=380)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.plotly_chart(grafico_vazio(), use_container_width=True)
         else:
             st.plotly_chart(grafico_vazio(), use_container_width=True)
 
     with g2:
-        fig = go.Figure(
-            go.Indicator(
-                mode="gauge+number",
-                value=prob_rate,
-                number={"suffix": "%"},
-                title={"text": "Taxa de problemáticos"},
-                gauge={
-                    "axis": {"range": [None, max(10, round(prob_rate * 1.6, 2) + 1)]},
-                    "bar": {"thickness": 0.35},
-                    "steps": [
-                        {"range": [0, 2], "color": "rgba(34,197,94,0.35)"},
-                        {"range": [2, 5], "color": "rgba(245,158,11,0.30)"},
-                        {"range": [5, 100], "color": "rgba(239,68,68,0.25)"},
-                    ],
-                },
-            )
-        )
+        fig = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=prob_rate,
+            number={"suffix": "%"},
+            title={"text": "Taxa de exceções"},
+            gauge={
+                "axis": {"range": [None, max(10, round(prob_rate * 1.6, 2) + 1)]},
+                "bar": {"thickness": 0.35},
+                "steps": [
+                    {"range": [0, 2], "color": "rgba(34,197,94,0.35)"},
+                    {"range": [2, 5], "color": "rgba(245,158,11,0.30)"},
+                    {"range": [5, 100], "color": "rgba(239,68,68,0.25)"},
+                ],
+            },
+        ))
         fig.update_layout(height=380)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -393,6 +334,7 @@ with tab1:
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.plotly_chart(grafico_vazio(), use_container_width=True)
+
     with l2:
         if not car_f.empty and "Digitalizador" in car_f.columns:
             top_digs = car_f["Digitalizador"].value_counts().head(10).reset_index()
@@ -408,9 +350,12 @@ with tab2:
     with p1:
         if not car_f.empty and "Hora" in car_f.columns:
             prod_hora = car_f.dropna(subset=["Hora"]).groupby("Hora").size().reset_index(name="Volumes")
-            fig = px.bar(prod_hora, x="Hora", y="Volumes", title="Volume por hora da digitalização")
-            fig.update_layout(height=380)
-            st.plotly_chart(fig, use_container_width=True)
+            if not prod_hora.empty:
+                fig = px.bar(prod_hora, x="Hora", y="Volumes", title="Volume por hora da digitalização")
+                fig.update_layout(height=380)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.plotly_chart(grafico_vazio(), use_container_width=True)
         else:
             st.plotly_chart(grafico_vazio(), use_container_width=True)
 
@@ -418,22 +363,20 @@ with tab2:
         if not car_f.empty and "Digitalizador" in car_f.columns:
             por_dig = car_f["Digitalizador"].value_counts().reset_index()
             por_dig.columns = ["Digitalizador", "Volumes"]
-            por_dig["% Part."] = por_dig["Volumes"] / por_dig["Volumes"].sum() * 100
+            por_dig["% Part."] = (por_dig["Volumes"] / por_dig["Volumes"].sum() * 100).round(2)
             st.dataframe(por_dig.head(15), use_container_width=True, hide_index=True)
         else:
             st.dataframe(pd.DataFrame())
 
     if not car_f.empty and {"Digitalizador", "Hora"}.issubset(car_f.columns):
         heat = car_f.dropna(subset=["Digitalizador", "Hora"]).groupby(["Digitalizador", "Hora"]).size().reset_index(name="Volumes")
-        heat_piv = heat.pivot(index="Digitalizador", columns="Hora", values="Volumes").fillna(0)
-        fig = px.imshow(
-            heat_piv,
-            aspect="auto",
-            title="Heatmap de produtividade por digitalizador e hora",
-            text_auto=True,
-        )
-        fig.update_layout(height=520)
-        st.plotly_chart(fig, use_container_width=True)
+        if not heat.empty:
+            heat_piv = heat.pivot(index="Digitalizador", columns="Hora", values="Volumes").fillna(0)
+            fig = px.imshow(heat_piv, aspect="auto", title="Heatmap de produtividade por digitalizador e hora", text_auto=True)
+            fig.update_layout(height=520)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.plotly_chart(grafico_vazio(), use_container_width=True)
     else:
         st.plotly_chart(grafico_vazio(), use_container_width=True)
 
@@ -460,58 +403,55 @@ with tab3:
             st.plotly_chart(grafico_vazio(), use_container_width=True)
 
     if not car_f.empty and {"Base Destino", "Município de Destino"}.issubset(car_f.columns):
-        cruz = (
-            car_f.groupby(["Base Destino", "Município de Destino"]).size().reset_index(name="Volumes")
-            .sort_values("Volumes", ascending=False)
-            .head(30)
-        )
+        cruz = car_f.groupby(["Base Destino", "Município de Destino"]).size().reset_index(name="Volumes").sort_values("Volumes", ascending=False).head(30)
         st.dataframe(cruz, use_container_width=True, hide_index=True)
 
 with tab4:
     pr1, pr2 = st.columns([1.1, 1])
     with pr1:
-        if not prob_f.empty and "Tipo problemático" in prob_f.columns:
+        if not prob_f.empty and "Tipo problemático" in prob_f.columns and prob_f["Tipo problemático"].notna().any():
             tipo = prob_f["Tipo problemático"].value_counts().reset_index()
             tipo.columns = ["Tipo problemático", "Ocorrências"]
-            fig = px.bar(tipo, x="Ocorrências", y="Tipo problemático", orientation="h", title="Distribuição dos problemáticos")
+            fig = px.bar(tipo, x="Ocorrências", y="Tipo problemático", orientation="h", title="Distribuição das exceções")
+            fig.update_layout(height=400, yaxis={"categoryorder": "total ascending"})
+            st.plotly_chart(fig, use_container_width=True)
+        elif not prob_f.empty and "Base Destino" in prob_f.columns:
+            resumo = prob_f["Base Destino"].value_counts().head(15).reset_index()
+            resumo.columns = ["Base Destino", "Ocorrências"]
+            fig = px.bar(resumo, x="Ocorrências", y="Base Destino", orientation="h", title="Exceções por base destino")
             fig.update_layout(height=400, yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.plotly_chart(grafico_vazio("Sem registros de pacotes problemáticos"), use_container_width=True)
+            st.plotly_chart(grafico_vazio("Sem registros críticos identificados"), use_container_width=True)
 
     with pr2:
         if not prob_f.empty and "Base Destino" in prob_f.columns:
             base_prob = prob_f["Base Destino"].value_counts().head(12).reset_index()
             base_prob.columns = ["Base Destino", "Ocorrências"]
-            fig = px.bar(base_prob, x="Base Destino", y="Ocorrências", title="Bases com mais ocorrências")
+            fig = px.bar(base_prob, x="Base Destino", y="Ocorrências", title="Bases com mais exceções")
             fig.update_layout(height=400)
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.plotly_chart(grafico_vazio(), use_container_width=True)
 
     if not prob_f.empty:
-        cols_exibir = [
-            c for c in [
-                "Número de pedido JMS",
-                "Tipo problemático",
-                "Descrição de Pacote Problemático",
-                "Base Destino",
-                "Município de Destino",
-                "Tempo de digitalização",
-            ] if c in prob_f.columns
-        ]
+        cols_exibir = [c for c in [
+            "Número de pedido JMS", "Tipo de bipagem", "Tipo problemático", "Descrição de Pacote Problemático",
+            "Base Destino", "Município de Destino", "Tempo de digitalização", "Base arquivo"
+        ] if c in prob_f.columns]
         st.dataframe(prob_f[cols_exibir].head(300), use_container_width=True, hide_index=True)
 
 with tab5:
     st.markdown("### Base analítica")
-    modo = st.radio("Tabela", ["CARREGAMENTO", "PROBLEMATICOS"], horizontal=True)
-    if modo == "CARREGAMENTO":
+    modo = st.radio("Tabela", ["GERAL", "EXCEÇÕES"], horizontal=True)
+    if modo == "GERAL":
         st.dataframe(car_f, use_container_width=True, hide_index=True, height=520)
         csv = car_f.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("Baixar CARREGAMENTO filtrado", csv, "carregamento_filtrado.csv", "text/csv")
+        st.download_button("Baixar base geral filtrada", csv, "base_geral_filtrada.csv", "text/csv")
     else:
         st.dataframe(prob_f, use_container_width=True, hide_index=True, height=520)
         csv = prob_f.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("Baixar PROBLEMATICOS filtrado", csv, "problematicos_filtrado.csv", "text/csv")
+        st.download_button("Baixar base de exceções filtrada", csv, "base_excecoes_filtrada.csv", "text/csv")
 
-st.caption(f"Abas identificadas nas bases carregadas: {', '.join(abas)}")
+st.caption(f"Abas identificadas: {', '.join(abas)}")
+st.caption(f"Modo de leitura: {' | '.join(modos)}")
